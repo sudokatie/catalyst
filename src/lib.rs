@@ -26,5 +26,8 @@ pub use parser::{
     build_file_to_targets, is_known_rule, Arg, BinOp, BuildFile, Expr, LexError, Lexer,
     ParseError, Parser, Statement, Token,
 };
-pub use scheduler::{PoolHandle, Task, TaskResult, WorkerPool, WorkerPoolRunner};
+pub use scheduler::{
+    BuildResult, PoolHandle, ScheduledAction, Scheduler, Task, TaskResult, WorkerPool,
+    WorkerPoolRunner,
+};
 pub use target::{Target, Value};
