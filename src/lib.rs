@@ -7,6 +7,7 @@ pub mod executor;
 pub mod graph;
 pub mod label;
 pub mod parser;
+pub mod rule;
 pub mod scheduler;
 pub mod target;
 
@@ -30,4 +31,5 @@ pub use scheduler::{
     BuildResult, PoolHandle, ScheduledAction, Scheduler, Task, TaskResult, WorkerPool,
     WorkerPoolRunner,
 };
+pub use rule::{expand_target, get_rule, Rule, RuleExpansion, RuleType};
 pub use target::{Target, Value};
