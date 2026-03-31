@@ -3,10 +3,12 @@
 pub mod action;
 pub mod error;
 pub mod label;
+pub mod parser;
 pub mod target;
 
 // Re-export core types
 pub use action::{Action, ActionId, ActionKey, ActionResult};
 pub use error::Error;
 pub use label::Label;
+pub use parser::{Lexer, Token, LexError};
 pub use target::{Target, Value};
