@@ -2,7 +2,10 @@
 
 use super::ast::{Arg, BinOp, BuildFile, Expr, Statement};
 use super::lexer::{LexError, Lexer, Token};
+use crate::{Error, Label, Target, Value};
+use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Parser error
 #[derive(Debug, Clone)]
@@ -350,6 +353,247 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Known rule types for validation
+const KNOWN_RULES: &[&str] = &[
+    "rust_binary",
+    "rust_library",
+    "rust_test",
+    "cc_binary",
+    "cc_library",
+    "cc_test",
+    "genrule",
+    "filegroup",
+    "test_suite",
+    "alias",
+    "exports_files",
+];
+
+/// Check if a rule type is known
+pub fn is_known_rule(name: &str) -> bool {
+    KNOWN_RULES.contains(&name)
+}
+
+/// Convert a parsed BUILD file to Target objects.
+///
+/// Takes the parsed AST and the package path, returns a list of targets
+/// defined in the file.
+pub fn build_file_to_targets(bf: &BuildFile, pkg: &str) -> Result<Vec<Target>, Error> {
+    // Build variable environment from assignments
+    let mut env: HashMap<String, Expr> = HashMap::new();
+    
+    for stmt in &bf.statements {
+        if let Statement::Assignment { name, value } = stmt {
+            env.insert(name.clone(), value.clone());
+        }
+    }
+    
+    let mut targets = Vec::new();
+    
+    for (rule_type, args) in bf.calls() {
+        // Skip non-rule calls like glob(), select(), etc.
+        if !is_known_rule(rule_type) {
+            continue;
+        }
+        
+        let target = call_to_target(rule_type, args, pkg, &env)?;
+        targets.push(target);
+    }
+    
+    Ok(targets)
+}
+
+/// Convert a single rule call to a Target
+fn call_to_target(
+    rule_type: &str,
+    args: &[Arg],
+    pkg: &str,
+    env: &HashMap<String, Expr>,
+) -> Result<Target, Error> {
+    // Extract name (required for all rules except exports_files)
+    let name = find_string_arg(args, "name", env)?
+        .ok_or_else(|| Error::MissingAttribute {
+            rule: rule_type.to_string(),
+            attr: "name".to_string(),
+        })?;
+    
+    let label = Label::new(pkg, &name);
+    let mut target = Target::new(label, rule_type);
+    
+    // Extract srcs
+    if let Some(srcs) = find_string_list_arg(args, "srcs", env)? {
+        for src in srcs {
+            target.add_src(PathBuf::from(src));
+        }
+    }
+    
+    // Extract deps - convert to Labels
+    if let Some(deps) = find_string_list_arg(args, "deps", env)? {
+        for dep in deps {
+            let dep_label = Label::parse(&dep)?.resolve(pkg);
+            target.add_dep(dep_label);
+        }
+    }
+    
+    // Extract outs (for genrule)
+    if let Some(outs) = find_string_list_arg(args, "outs", env)? {
+        for out in outs {
+            target.add_out(PathBuf::from(out));
+        }
+    }
+    
+    // Store remaining attributes
+    for arg in args {
+        if let Some(attr_name) = &arg.name {
+            // Skip already-processed attributes
+            if matches!(attr_name.as_str(), "name" | "srcs" | "deps" | "outs") {
+                continue;
+            }
+            
+            let value = expr_to_value(&arg.value, env)?;
+            target.set_attr(attr_name, value);
+        }
+    }
+    
+    Ok(target)
+}
+
+/// Find a string-valued keyword argument
+fn find_string_arg(
+    args: &[Arg],
+    name: &str,
+    env: &HashMap<String, Expr>,
+) -> Result<Option<String>, Error> {
+    for arg in args {
+        if arg.name.as_deref() == Some(name) {
+            return match eval_expr(&arg.value, env)? {
+                Expr::String(s) => Ok(Some(s)),
+                other => Err(Error::InvalidAttributeType {
+                    attr: name.to_string(),
+                    expected: "string".to_string(),
+                    got: expr_type_name(&other),
+                }),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// Find a string-list-valued keyword argument
+fn find_string_list_arg(
+    args: &[Arg],
+    name: &str,
+    env: &HashMap<String, Expr>,
+) -> Result<Option<Vec<String>>, Error> {
+    for arg in args {
+        if arg.name.as_deref() == Some(name) {
+            return match eval_expr(&arg.value, env)? {
+                Expr::List(items) => {
+                    let mut strings = Vec::new();
+                    for item in items {
+                        match item {
+                            Expr::String(s) => strings.push(s),
+                            other => {
+                                return Err(Error::InvalidAttributeType {
+                                    attr: name.to_string(),
+                                    expected: "list of strings".to_string(),
+                                    got: format!("list containing {}", expr_type_name(&other)),
+                                });
+                            }
+                        }
+                    }
+                    Ok(Some(strings))
+                }
+                other => Err(Error::InvalidAttributeType {
+                    attr: name.to_string(),
+                    expected: "list".to_string(),
+                    got: expr_type_name(&other),
+                }),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// Evaluate an expression, resolving variable references
+fn eval_expr(expr: &Expr, env: &HashMap<String, Expr>) -> Result<Expr, Error> {
+    match expr {
+        Expr::Ident(name) => {
+            env.get(name)
+                .cloned()
+                .ok_or_else(|| Error::UndefinedVariable(name.clone()))
+        }
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            let left_val = eval_expr(left, env)?;
+            let right_val = eval_expr(right, env)?;
+            
+            match (left_val, right_val) {
+                (Expr::List(mut l), Expr::List(r)) => {
+                    l.extend(r);
+                    Ok(Expr::List(l))
+                }
+                (Expr::String(mut l), Expr::String(r)) => {
+                    l.push_str(&r);
+                    Ok(Expr::String(l))
+                }
+                _ => Err(Error::InvalidAttributeType {
+                    attr: "+".to_string(),
+                    expected: "matching list or string types".to_string(),
+                    got: "incompatible types".to_string(),
+                }),
+            }
+        }
+        Expr::List(items) => {
+            let mut evaled = Vec::new();
+            for item in items {
+                evaled.push(eval_expr(item, env)?);
+            }
+            Ok(Expr::List(evaled))
+        }
+        // Primitives and other expressions pass through
+        _ => Ok(expr.clone()),
+    }
+}
+
+/// Convert an Expr to a Value for storage in Target.attrs
+fn expr_to_value(expr: &Expr, env: &HashMap<String, Expr>) -> Result<Value, Error> {
+    let evaled = eval_expr(expr, env)?;
+    
+    match evaled {
+        Expr::String(s) => Ok(Value::String(s)),
+        Expr::Int(i) => Ok(Value::Int(i)),
+        Expr::Bool(b) => Ok(Value::Bool(b)),
+        Expr::List(items) => {
+            let values: Result<Vec<_>, _> = items
+                .iter()
+                .map(|item| expr_to_value(item, env))
+                .collect();
+            Ok(Value::List(values?))
+        }
+        Expr::Dict(entries) => {
+            let mut map = HashMap::new();
+            for (k, v) in entries {
+                map.insert(k, expr_to_value(&v, env)?);
+            }
+            Ok(Value::Dict(map))
+        }
+        _ => Ok(Value::String(format!("{:?}", evaled))),
+    }
+}
+
+/// Get a type name for error messages
+fn expr_type_name(expr: &Expr) -> String {
+    match expr {
+        Expr::String(_) => "string".to_string(),
+        Expr::Int(_) => "int".to_string(),
+        Expr::Bool(_) => "bool".to_string(),
+        Expr::Ident(_) => "identifier".to_string(),
+        Expr::List(_) => "list".to_string(),
+        Expr::Dict(_) => "dict".to_string(),
+        Expr::Call { .. } => "call".to_string(),
+        Expr::BinOp { .. } => "expression".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +747,107 @@ rust_binary(
         } else {
             panic!("expected assignment");
         }
+    }
+
+    // ===== build_file_to_targets tests =====
+
+    #[test]
+    fn convert_rust_binary_to_target() {
+        let input = r#"
+rust_binary(
+    name = "myapp",
+    srcs = ["src/main.rs", "src/lib.rs"],
+    deps = [":mylib", "//other:dep"],
+)
+"#;
+        let mut parser = Parser::new(input).unwrap();
+        let bf = parser.parse().unwrap();
+        let targets = build_file_to_targets(&bf, "pkg").unwrap();
+        
+        assert_eq!(targets.len(), 1);
+        let t = &targets[0];
+        assert_eq!(t.label.package, "pkg");
+        assert_eq!(t.label.name, "myapp");
+        assert_eq!(t.rule_type, "rust_binary");
+        assert_eq!(t.srcs.len(), 2);
+        assert_eq!(t.srcs[0], PathBuf::from("src/main.rs"));
+        assert_eq!(t.deps.len(), 2);
+        assert_eq!(t.deps[0].package, "pkg");  // Resolved relative
+        assert_eq!(t.deps[0].name, "mylib");
+        assert_eq!(t.deps[1].package, "other");  // Absolute unchanged
+        assert_eq!(t.deps[1].name, "dep");
+    }
+
+    #[test]
+    fn convert_genrule_to_target() {
+        let input = r#"
+genrule(
+    name = "generate_config",
+    srcs = ["config.in"],
+    outs = ["config.json"],
+    cmd = "process $< > $@",
+)
+"#;
+        let mut parser = Parser::new(input).unwrap();
+        let bf = parser.parse().unwrap();
+        let targets = build_file_to_targets(&bf, "tools").unwrap();
+        
+        assert_eq!(targets.len(), 1);
+        let t = &targets[0];
+        assert_eq!(t.rule_type, "genrule");
+        assert_eq!(t.outs.len(), 1);
+        assert_eq!(t.outs[0], PathBuf::from("config.json"));
+        assert_eq!(t.get_attr("cmd").unwrap().as_str(), Some("process $< > $@"));
+    }
+
+    #[test]
+    fn handle_deps_as_labels() {
+        let input = r#"
+rust_library(
+    name = "mylib",
+    deps = [":local", "//abs/path:target"],
+)
+"#;
+        let mut parser = Parser::new(input).unwrap();
+        let bf = parser.parse().unwrap();
+        let targets = build_file_to_targets(&bf, "my/pkg").unwrap();
+        
+        assert_eq!(targets[0].deps.len(), 2);
+        // Relative resolved
+        assert_eq!(targets[0].deps[0].absolute(), "//my/pkg:local");
+        // Absolute kept
+        assert_eq!(targets[0].deps[1].absolute(), "//abs/path:target");
+    }
+
+    #[test]
+    fn handle_srcs_as_pathbuf() {
+        let input = r#"
+rust_library(
+    name = "lib",
+    srcs = ["src/a.rs", "src/b.rs", "src/sub/c.rs"],
+)
+"#;
+        let mut parser = Parser::new(input).unwrap();
+        let bf = parser.parse().unwrap();
+        let targets = build_file_to_targets(&bf, "pkg").unwrap();
+        
+        assert_eq!(targets[0].srcs.len(), 3);
+        assert_eq!(targets[0].srcs[2], PathBuf::from("src/sub/c.rs"));
+    }
+
+    #[test]
+    fn error_on_missing_name() {
+        let input = r#"
+rust_binary(
+    srcs = ["main.rs"],
+)
+"#;
+        let mut parser = Parser::new(input).unwrap();
+        let bf = parser.parse().unwrap();
+        let result = build_file_to_targets(&bf, "pkg");
+        
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("name"));
     }
 }

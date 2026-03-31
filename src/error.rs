@@ -38,6 +38,22 @@ pub enum Error {
     #[error("Invalid label: {0}")]
     InvalidLabel(String),
 
+    #[error("Unknown rule type: {0}")]
+    UnknownRule(String),
+
+    #[error("Missing required attribute '{attr}' for rule '{rule}'")]
+    MissingAttribute { rule: String, attr: String },
+
+    #[error("Invalid attribute type for '{attr}': expected {expected}, got {got}")]
+    InvalidAttributeType {
+        attr: String,
+        expected: String,
+        got: String,
+    },
+
+    #[error("Undefined variable: {0}")]
+    UndefinedVariable(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
