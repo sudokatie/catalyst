@@ -261,8 +261,8 @@ impl<'a> Parser<'a> {
         // Check for keyword argument: name = value
         if let Token::Ident(name) = &self.current {
             let name = name.clone();
-            let saved_line = self.line;
-            let saved_col = self.col;
+            let _saved_line = self.line;
+            let _saved_col = self.col;
             self.advance()?;
             
             if matches!(self.current, Token::Equals) {

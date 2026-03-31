@@ -9,7 +9,7 @@ pub mod target;
 
 // Re-export core types
 pub use action::{Action, ActionId, ActionKey, ActionResult};
-pub use cache::{hash_action, hash_bytes, hash_file, hash_to_hex, hex_to_hash, Hash, Hasher};
+pub use cache::{hash_action, hash_bytes, hash_file, hash_to_hex, hex_to_hash, Hash, Hasher, CAS};
 pub use error::Error;
 pub use label::Label;
 pub use parser::{
