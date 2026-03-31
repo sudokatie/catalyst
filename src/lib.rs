@@ -3,6 +3,7 @@
 pub mod action;
 pub mod cache;
 pub mod error;
+pub mod executor;
 pub mod graph;
 pub mod label;
 pub mod parser;
@@ -15,6 +16,7 @@ pub use cache::{
     MetadataStore, CAS,
 };
 pub use error::Error;
+pub use executor::{execute_sync, ExecutionResult, Executor, LocalExecutor};
 pub use graph::{
     ActionNode, FileKind, FileNode, Graph, Node, NodeId, QueryEngine, Resolver, TargetNode,
 };
