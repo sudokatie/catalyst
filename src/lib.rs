@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod cache;
+pub mod config;
 pub mod error;
 pub mod executor;
 pub mod graph;
@@ -17,6 +18,7 @@ pub use cache::{
     hash_action, hash_bytes, hash_file, hash_to_hex, hex_to_hash, ActionCache, Hash, Hasher,
     MetadataStore, CAS,
 };
+pub use config::{BuildConfig, CacheConfig, Config, RemoteConfig};
 pub use error::Error;
 pub use executor::{execute_sync, ExecutionResult, Executor, LocalExecutor};
 pub use graph::{
