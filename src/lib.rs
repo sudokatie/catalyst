@@ -15,7 +15,7 @@ pub use cache::{
     MetadataStore, CAS,
 };
 pub use error::Error;
-pub use graph::{ActionNode, FileKind, FileNode, Node, NodeId, TargetNode};
+pub use graph::{ActionNode, FileKind, FileNode, Graph, Node, NodeId, Resolver, TargetNode};
 pub use label::Label;
 pub use parser::{
     build_file_to_targets, is_known_rule, Arg, BinOp, BuildFile, Expr, LexError, Lexer,
