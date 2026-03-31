@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::{Action, ActionResult, Error};
+use crate::{Action, Error};
 
 /// Result of executing an action
 #[derive(Debug, Clone)]
