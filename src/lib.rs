@@ -10,5 +10,5 @@ pub mod target;
 pub use action::{Action, ActionId, ActionKey, ActionResult};
 pub use error::Error;
 pub use label::Label;
-pub use parser::{Arg, BinOp, BuildFile, Expr, Statement, Lexer, Token, LexError};
+pub use parser::{Arg, BinOp, BuildFile, Expr, Statement, Parser, ParseError, Lexer, Token, LexError};
 pub use target::{Target, Value};
