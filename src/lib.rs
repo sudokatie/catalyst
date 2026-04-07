@@ -1,6 +1,7 @@
 //! Catalyst - Build system with hermetic builds and content-addressed caching
 
 pub mod action;
+pub mod analytics;
 pub mod cache;
 pub mod config;
 pub mod error;
@@ -35,3 +36,4 @@ pub use scheduler::{
 };
 pub use rule::{expand_target, get_rule, Rule, RuleExpansion, RuleType};
 pub use target::{Target, Value};
+pub use analytics::{ActionStats, BuildStats, CacheStats, CriticalPath, HtmlReport, ReportConfig};
