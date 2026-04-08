@@ -65,6 +65,9 @@ pub enum Error {
 
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    #[error("Remote execution error: {0}")]
+    Remote(String),
 }
 
 #[cfg(test)]

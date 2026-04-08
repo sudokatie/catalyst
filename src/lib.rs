@@ -9,6 +9,7 @@ pub mod executor;
 pub mod graph;
 pub mod label;
 pub mod parser;
+pub mod remote;
 pub mod rule;
 pub mod scheduler;
 pub mod target;
@@ -37,3 +38,4 @@ pub use scheduler::{
 pub use rule::{expand_target, get_rule, Rule, RuleExpansion, RuleType};
 pub use target::{Target, Value};
 pub use analytics::{ActionStats, BuildStats, CacheStats, CriticalPath, HtmlReport, ReportConfig};
+pub use remote::{RemoteConfig as RemoteExecConfig, RemoteExecutor, TlsConfig, Worker, WorkerConfig};
