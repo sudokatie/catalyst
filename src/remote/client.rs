@@ -266,6 +266,39 @@ mod tests {
         assert_eq!(config.workers.len(), 1);
     }
 
+    #[test]
+    fn config_with_multiple_workers() {
+        let config = RemoteConfig {
+            workers: vec![
+                "worker1:9000".to_string(),
+                "worker2:9000".to_string(),
+                "worker3:9000".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(config.workers.len(), 3);
+    }
+
+    #[test]
+    fn config_timeouts() {
+        let config = RemoteConfig {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(600),
+            ..Default::default()
+        };
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.request_timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn config_no_fallback() {
+        let config = RemoteConfig {
+            fallback_to_local: false,
+            ..Default::default()
+        };
+        assert!(!config.fallback_to_local);
+    }
+
     #[tokio::test]
     async fn fallback_to_local_when_no_workers() {
         // Create executor with no workers - should use local

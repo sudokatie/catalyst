@@ -6,6 +6,7 @@
 //!
 //! - **Client (RemoteExecutor)**: Implements `Executor` trait, connects to workers
 //! - **Worker**: Service that accepts connections and executes actions locally
+//! - **Distributor**: Automatic work distribution with load balancing
 //! - **Protocol**: Binary messages for execute requests, responses, status
 //! - **TLS**: mTLS configuration for secure communication
 //!
@@ -29,11 +30,13 @@
 //! ```
 
 mod client;
+mod distributor;
 mod protocol;
 mod tls;
 mod worker;
 
 pub use client::{RemoteConfig, RemoteExecutor};
+pub use distributor::{DistributionStrategy, Distributor, WorkerState};
 pub use protocol::{ExecuteRequest, ExecuteResponse, ExecuteResult, Message, WorkerStatus};
 pub use tls::{TlsConfig, TlsError};
 pub use worker::{Worker, WorkerConfig};

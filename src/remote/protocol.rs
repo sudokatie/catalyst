@@ -175,4 +175,90 @@ mod tests {
         assert!(ping.to_bytes().is_ok());
         assert!(pong.to_bytes().is_ok());
     }
+
+    #[test]
+    fn serialize_response_failed() {
+        let resp = ExecuteResponse {
+            request_id: 100,
+            result: ExecuteResult::Failed {
+                exit_code: 1,
+                stdout: vec![],
+                stderr: b"error message".to_vec(),
+                error: "command failed".to_string(),
+            },
+        };
+        let msg = Message::Response(resp);
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        
+        if let Message::Response(resp) = decoded {
+            assert_eq!(resp.request_id, 100);
+            if let ExecuteResult::Failed { exit_code, error, .. } = resp.result {
+                assert_eq!(exit_code, 1);
+                assert_eq!(error, "command failed");
+            } else {
+                panic!("Expected Failed result");
+            }
+        } else {
+            panic!("Expected Response message");
+        }
+    }
+
+    #[test]
+    fn serialize_response_error() {
+        let resp = ExecuteResponse {
+            request_id: 200,
+            result: ExecuteResult::Error {
+                message: "worker crashed".to_string(),
+            },
+        };
+        let msg = Message::Response(resp);
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        
+        if let Message::Response(resp) = decoded {
+            if let ExecuteResult::Error { message } = resp.result {
+                assert_eq!(message, "worker crashed");
+            } else {
+                panic!("Expected Error result");
+            }
+        } else {
+            panic!("Expected Response message");
+        }
+    }
+
+    #[test]
+    fn serialize_request_with_env() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        env.insert("HOME".to_string(), "/home/user".to_string());
+        
+        let req = ExecuteRequest {
+            request_id: 50,
+            command: vec!["make".to_string()],
+            env,
+            working_dir: PathBuf::from("/project"),
+            input_hashes: HashMap::new(),
+            outputs: vec![PathBuf::from("output.o")],
+        };
+        let msg = Message::Execute(req);
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        
+        if let Message::Execute(req) = decoded {
+            assert_eq!(req.env.get("PATH"), Some(&"/usr/bin".to_string()));
+            assert_eq!(req.outputs.len(), 1);
+        } else {
+            panic!("Expected Execute message");
+        }
+    }
+
+    #[test]
+    fn status_request_roundtrip() {
+        let msg = Message::StatusRequest;
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        
+        assert!(matches!(decoded, Message::StatusRequest));
+    }
 }
