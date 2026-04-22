@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 
 use crate::executor::{Executor, LocalExecutor};
-use crate::{Action, Error};
+use crate::{hash_file, hash_to_hex, Action, Error};
 
 use super::protocol::{ExecuteRequest, ExecuteResponse, ExecuteResult, Message, WorkerStatus};
 use super::tls::TlsConfig;
@@ -153,24 +154,39 @@ impl Worker {
         }
     }
 
+    /// Compute SHA-256 hashes for all output files
+    fn compute_output_hashes(outputs: &[PathBuf]) -> HashMap<PathBuf, String> {
+        let mut hashes = HashMap::new();
+        for output in outputs {
+            if output.exists() {
+                if let Ok(hash) = hash_file(output) {
+                    hashes.insert(output.clone(), hash_to_hex(&hash));
+                }
+            }
+        }
+        hashes
+    }
+
     async fn execute_request(&self, request: ExecuteRequest) -> ExecuteResult {
         let action = Action {
             id: request.request_id,
             command: request.command,
             inputs: vec![],
-            outputs: request.outputs,
+            outputs: request.outputs.clone(),
             env: request.env,
             working_dir: request.working_dir,
         };
-        
+
         match self.executor.execute(&action).await {
             Ok(result) => {
                 if result.success() {
+                    // Compute hashes of all output files after execution
+                    let output_hashes = Self::compute_output_hashes(&request.outputs);
                     ExecuteResult::Success {
                         exit_code: result.exit_code,
                         stdout: result.stdout,
                         stderr: result.stderr,
-                        output_hashes: HashMap::new(), // TODO: compute output hashes
+                        output_hashes,
                     }
                 } else {
                     ExecuteResult::Failed {
@@ -191,6 +207,8 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn default_worker_config() {
@@ -208,5 +226,96 @@ mod tests {
         };
         assert_eq!(config.max_jobs, 8);
         assert_eq!(config.worker_id, "my-worker");
+    }
+
+    // TASK 27 Tests: Output Hash Computation
+
+    #[test]
+    fn compute_output_hashes_with_existing_files() {
+        let dir = tempdir().unwrap();
+        let out1 = dir.path().join("out1.o");
+        let out2 = dir.path().join("out2.o");
+
+        std::fs::write(&out1, b"output content 1").unwrap();
+        std::fs::write(&out2, b"output content 2").unwrap();
+
+        let outputs = vec![out1.clone(), out2.clone()];
+        let hashes = Worker::compute_output_hashes(&outputs);
+
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains_key(&out1));
+        assert!(hashes.contains_key(&out2));
+        // Verify hashes are 64-char hex strings (SHA-256)
+        for hash in hashes.values() {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn compute_output_hashes_skips_missing_files() {
+        let outputs = vec![
+            PathBuf::from("/nonexistent/out1.o"),
+            PathBuf::from("/nonexistent/out2.o"),
+        ];
+        let hashes = Worker::compute_output_hashes(&outputs);
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn compute_output_hashes_empty_outputs() {
+        let outputs: Vec<PathBuf> = vec![];
+        let hashes = Worker::compute_output_hashes(&outputs);
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn compute_output_hashes_same_content_same_hash() {
+        let dir = tempdir().unwrap();
+        let out1 = dir.path().join("out1.o");
+        let out2 = dir.path().join("out2.o");
+
+        std::fs::write(&out1, b"identical content").unwrap();
+        std::fs::write(&out2, b"identical content").unwrap();
+
+        let outputs = vec![out1.clone(), out2.clone()];
+        let hashes = Worker::compute_output_hashes(&outputs);
+
+        let h1 = hashes.get(&out1).unwrap();
+        let h2 = hashes.get(&out2).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn compute_output_hashes_different_content_different_hash() {
+        let dir = tempdir().unwrap();
+        let out1 = dir.path().join("out1.o");
+        let out2 = dir.path().join("out2.o");
+
+        std::fs::write(&out1, b"content A").unwrap();
+        std::fs::write(&out2, b"content B").unwrap();
+
+        let outputs = vec![out1.clone(), out2.clone()];
+        let hashes = Worker::compute_output_hashes(&outputs);
+
+        let h1 = hashes.get(&out1).unwrap();
+        let h2 = hashes.get(&out2).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn compute_output_hashes_partial_files() {
+        let dir = tempdir().unwrap();
+        let existing = dir.path().join("exists.o");
+        let missing = dir.path().join("missing.o");
+
+        std::fs::write(&existing, b"content").unwrap();
+
+        let outputs = vec![existing.clone(), missing.clone()];
+        let hashes = Worker::compute_output_hashes(&outputs);
+
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes.contains_key(&existing));
+        assert!(!hashes.contains_key(&missing));
     }
 }

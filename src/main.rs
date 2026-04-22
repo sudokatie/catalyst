@@ -2,8 +2,12 @@ use clap::{Parser, Subcommand};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime};
 
-use catalyst::{Config, Error, Label, Node, QueryEngine, Resolver};
+use catalyst::{
+    expand_target, Config, Error, Label, MetadataStore, Node, QueryEngine, Resolver,
+    ScheduledAction, Scheduler,
+};
 
 #[derive(Parser)]
 #[command(name = "catalyst")]
@@ -81,6 +85,14 @@ enum Commands {
         /// Remove entries older than N days
         #[arg(long, default_value = "30")]
         older_than: u64,
+
+        /// Show what would be deleted without actually deleting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// List each deleted file
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Show build configuration
@@ -108,7 +120,11 @@ fn main() -> ExitCode {
             output,
         } => cmd_query(&workspace, &mode, &target, &output),
         Commands::Clean { expunge } => cmd_clean(&workspace, expunge),
-        Commands::Gc { older_than } => cmd_gc(&workspace, older_than),
+        Commands::Gc {
+            older_than,
+            dry_run,
+            verbose,
+        } => cmd_gc(&workspace, older_than, dry_run, verbose),
         Commands::Info => cmd_info(&workspace),
     };
 
@@ -190,21 +206,114 @@ fn cmd_test(workspace: &PathBuf, targets: &[String]) -> Result<(), Error> {
 }
 
 fn cmd_run(workspace: &PathBuf, target: &str, args: &[String]) -> Result<(), Error> {
+    let config = Config::load_default(Some(workspace))?.with_env_overrides();
     let label = Label::parse(target)?;
 
     let mut resolver = Resolver::new(workspace.clone());
     resolver.resolve(&label)?;
 
-    if let Some(t) = resolver.get_target(&label) {
-        if t.rule_type == "rust_binary" || t.rule_type == "cc_binary" {
-            println!("Would run {} with args: {:?}", label, args);
-            // TODO: Actually build and run
-        } else {
-            return Err(Error::Config(format!(
-                "Target {} is not a binary ({})",
-                label, t.rule_type
-            )));
+    let t = resolver
+        .get_target(&label)
+        .ok_or_else(|| Error::UnknownTarget(label.to_string()))?
+        .clone();
+
+    if t.rule_type != "rust_binary" && t.rule_type != "cc_binary" {
+        return Err(Error::Config(format!(
+            "Target {} is not a binary ({})",
+            label, t.rule_type
+        )));
+    }
+
+    // Build the target first
+    let output_dir = workspace.join(".catalyst").join("out");
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Expand target into actions
+    let expansion = expand_target(&t, &output_dir);
+
+    if expansion.actions.is_empty() {
+        return Err(Error::Config(format!(
+            "Target {} has no build actions",
+            label
+        )));
+    }
+
+    println!("Building {}...", label);
+
+    // Build dependencies first, then the target
+    let graph = resolver.graph();
+
+    // Get topological order for building
+    let topo = graph.topo_order()?;
+
+    // Collect all actions from dependencies and target
+    let rt = tokio::runtime::Runtime::new().map_err(|e| Error::Io(e.into()))?;
+
+    let build_result = rt.block_on(async {
+        let jobs = config.jobs();
+        let (mut scheduler, runner) = Scheduler::new(jobs);
+        tokio::spawn(runner.run());
+
+        // Build all dependencies in order, then the target
+        for node_id in &topo {
+            if let Some(Node::Target(target_node)) = graph.get(*node_id) {
+                if let Some(dep_target) = resolver.get_target(&target_node.label) {
+                    let dep_expansion = expand_target(dep_target, &output_dir);
+                    for action in dep_expansion.actions {
+                        let mut scheduled = ScheduledAction::new(action.clone());
+                        scheduled.action.set_working_dir(workspace.clone());
+                        scheduler.add(scheduled);
+                    }
+                }
+            }
         }
+
+        scheduler.execute().await
+    })?;
+
+    if !build_result.success() {
+        let failed_count = build_result.failed;
+        return Err(Error::ActionFailed {
+            command: format!("build {}", label),
+            exit_code: 1,
+            stderr: format!("{} action(s) failed", failed_count),
+        });
+    }
+
+    println!("Build succeeded ({} actions)", build_result.succeeded);
+
+    // Find the output binary
+    let binary_path = if expansion.outputs.is_empty() {
+        output_dir.join(&label.name)
+    } else {
+        expansion.outputs[0].clone()
+    };
+
+    if !binary_path.exists() {
+        return Err(Error::Config(format!(
+            "Binary not found at {:?}",
+            binary_path
+        )));
+    }
+
+    // Run the binary
+    println!("Running {}...", binary_path.display());
+    let status = std::process::Command::new(&binary_path)
+        .args(args)
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| Error::Io(e))?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(1);
+        return Err(Error::ActionFailed {
+            command: binary_path.to_string_lossy().to_string(),
+            exit_code: code,
+            stderr: format!("Process exited with code {}", code),
+        });
     }
 
     Ok(())
@@ -272,7 +381,12 @@ fn cmd_clean(workspace: &PathBuf, expunge: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn cmd_gc(workspace: &PathBuf, older_than_days: u64) -> Result<(), Error> {
+fn cmd_gc(
+    workspace: &PathBuf,
+    older_than_days: u64,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<(), Error> {
     let config = Config::load_default(Some(workspace))?.with_env_overrides();
     let cache_dir = config.cache_dir();
 
@@ -281,15 +395,138 @@ fn cmd_gc(workspace: &PathBuf, older_than_days: u64) -> Result<(), Error> {
         return Ok(());
     }
 
+    let mode = if dry_run { " (dry-run)" } else { "" };
     println!(
-        "Garbage collecting cache entries older than {} days",
-        older_than_days
+        "Garbage collecting cache entries older than {} days{}",
+        older_than_days, mode
     );
     println!("Cache directory: {:?}", cache_dir);
 
-    // TODO: Actually implement GC using MetadataStore
+    // Calculate cutoff time
+    let cutoff = SystemTime::now() - Duration::from_secs(older_than_days * 24 * 60 * 60);
+
+    // Initialize metadata store path
+    let metadata_path = cache_dir.join("metadata.db");
+
+    let mut files_deleted = 0usize;
+    let mut bytes_freed = 0u64;
+    let mut files_kept = 0usize;
+
+    // GC from MetadataStore if it exists
+    if metadata_path.exists() {
+        let store = MetadataStore::new(&metadata_path)?;
+
+        if dry_run {
+            // In dry-run mode, just count what would be deleted
+            let all_paths = store.all_paths()?;
+            for path in &all_paths {
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    if let Ok(accessed) = metadata.accessed() {
+                        if accessed < cutoff {
+                            files_deleted += 1;
+                            bytes_freed += metadata.len();
+                            if verbose {
+                                println!("  Would delete: {:?}", path);
+                            }
+                        } else {
+                            files_kept += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            let removed = store.gc(cutoff)?;
+            files_deleted += removed;
+            if verbose && removed > 0 {
+                println!("  Removed {} metadata entries", removed);
+            }
+        }
+    }
+
+    // GC from action cache directory
+    let action_cache_dir = cache_dir.join("actions");
+    if action_cache_dir.exists() {
+        gc_directory(&action_cache_dir, cutoff, dry_run, verbose, &mut files_deleted, &mut bytes_freed, &mut files_kept)?;
+    }
+
+    // GC from CAS directory
+    let cas_dir = cache_dir.join("cas");
+    if cas_dir.exists() {
+        gc_directory(&cas_dir, cutoff, dry_run, verbose, &mut files_deleted, &mut bytes_freed, &mut files_kept)?;
+    }
+
+    println!();
+    if dry_run {
+        println!("Would delete {} files ({} bytes)", files_deleted, bytes_freed);
+        println!("Would keep {} files", files_kept);
+    } else {
+        println!("Deleted {} files ({} bytes freed)", files_deleted, bytes_freed);
+        println!("Kept {} files", files_kept);
+    }
     println!("GC complete");
 
+    Ok(())
+}
+
+/// Garbage collect files in a directory that haven't been accessed since cutoff
+fn gc_directory(
+    dir: &PathBuf,
+    cutoff: SystemTime,
+    dry_run: bool,
+    verbose: bool,
+    files_deleted: &mut usize,
+    bytes_freed: &mut u64,
+    files_kept: &mut usize,
+) -> Result<(), Error> {
+    gc_directory_recursive(dir, cutoff, dry_run, verbose, files_deleted, bytes_freed, files_kept)
+}
+
+fn gc_directory_recursive(
+    dir: &PathBuf,
+    cutoff: SystemTime,
+    dry_run: bool,
+    verbose: bool,
+    files_deleted: &mut usize,
+    bytes_freed: &mut u64,
+    files_kept: &mut usize,
+) -> Result<(), Error> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if file_type.is_dir() {
+            gc_directory_recursive(&path, cutoff, dry_run, verbose, files_deleted, bytes_freed, files_kept)?;
+        } else if file_type.is_file() {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                // Use mtime since atime may not be reliable
+                let file_time = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                if file_time < cutoff {
+                    *files_deleted += 1;
+                    *bytes_freed += metadata.len();
+                    if verbose {
+                        println!(
+                            "  {}: {:?}",
+                            if dry_run { "Would delete" } else { "Deleting" },
+                            path
+                        );
+                    }
+                    if !dry_run {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                } else {
+                    *files_kept += 1;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
